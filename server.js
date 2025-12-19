@@ -496,6 +496,86 @@ ${materials.rows.map(m => `- ${m.title}: ${m.description || ''}`).join('\n')}
     }
 });
 
+
+// Aggiungi questo endpoint DOPO gli altri endpoint API nel server.js
+// Inserisci dopo l'endpoint /api/chat (circa riga 400)
+
+// ============================================
+// GOOGLE CLOUD TEXT-TO-SPEECH ENDPOINT
+// ============================================
+
+app.post('/api/tts', authenticateToken, async (req, res) => {
+    try {
+        const { text, voiceLang = 'en-US', voiceGender = 'NEUTRAL' } = req.body;
+
+        if (!text) {
+            return res.status(400).json({ error: 'Text is required' });
+        }
+
+        // Limita lunghezza testo (max 5000 caratteri)
+        const limitedText = text.substring(0, 5000);
+
+        // Voice mapping per lingue diverse
+        const voiceMap = {
+            'en-US': { name: 'en-US-Neural2-J', gender: 'MALE' },      // Voce maschile naturale US
+            'en-GB': { name: 'en-GB-Neural2-B', gender: 'FEMALE' },    // Voce femminile naturale UK
+            'en-AU': { name: 'en-AU-Neural2-B', gender: 'FEMALE' },
+            'en-IN': { name: 'en-IN-Neural2-B', gender: 'FEMALE' },
+            'en-CA': { name: 'en-US-Neural2-J', gender: 'MALE' }
+        };
+
+        const voice = voiceMap[voiceLang] || voiceMap['en-US'];
+
+        // Chiamata a Google Cloud TTS
+        const response = await fetch(
+`https://texttospeech.googleapis.com/v1/text:synthesize?key=${process.env.GOOGLE_TTS_API_KEY || process.env.GOOGLE_API_KEY}`,
+            
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    input: { text: limitedText },
+                    voice: {
+                        languageCode: voiceLang,
+                        name: voice.name,
+                        ssmlGender: voice.gender
+                    },
+                    audioConfig: {
+                        audioEncoding: 'MP3',
+                        speakingRate: 0.95,  // Leggermente più lento per chiarezza
+                        pitch: 0.0,
+                        volumeGainDb: 0.0,
+                        effectsProfileId: ['headphone-class-device']  // Ottimizzato per cuffie
+                    }
+                })
+            }
+        );
+
+        if (!response.ok) {
+            throw new Error(`TTS API error: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+
+        // Ritorna l'audio in base64
+        res.json({
+            audioContent: data.audioContent,  // Base64 encoded MP3
+            voiceUsed: voice.name
+        });
+
+    } catch (error) {
+        console.error('TTS error:', error);
+        res.status(500).json({ 
+            error: 'Text-to-speech failed',
+            fallbackToLocal: true  // Frontend userà voce browser
+        });
+    }
+});
+
+
+
+
+
 // ============================================
 // MATERIALS ROUTES (Admin only)
 // ============================================
