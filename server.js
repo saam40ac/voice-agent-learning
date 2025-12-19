@@ -497,21 +497,176 @@ ${materials.rows.map(m => `- ${m.title}: ${m.description || ''}`).join('\n')}
 });
 
 // ============================================
-// GOOGLE CLOUD TEXT-TO-SPEECH ENDPOINT
+// TTS SETTINGS MANAGEMENT (Admin)
 // ============================================
+// Aggiungi questo codice nel server.js dopo l'endpoint /api/tts
+
+// Get TTS settings (Admin only)
+app.get('/api/admin/tts-settings', authenticate, requireAdmin, async (req, res) => {
+    const client = await pool.connect();
+    try {
+        // Check if settings exist
+        let result = await client.query(
+            `SELECT * FROM api_configs WHERE config_key = 'tts_daily_limit'`
+        );
+
+        if (result.rows.length === 0) {
+            // Create default setting
+            await client.query(
+                `INSERT INTO api_configs (config_key, config_value, description)
+                 VALUES ('tts_daily_limit', '15', 'Daily premium TTS limit per student')
+                 RETURNING *`
+            );
+            result = await client.query(
+                `SELECT * FROM api_configs WHERE config_key = 'tts_daily_limit'`
+            );
+        }
+
+        res.json({
+            dailyLimit: parseInt(result.rows[0].config_value),
+            description: result.rows[0].description
+        });
+    } catch (err) {
+        console.error('Get TTS settings error:', err);
+        res.status(500).json({ error: 'Failed to get TTS settings' });
+    } finally {
+        client.release();
+    }
+});
+
+// Update TTS settings (Admin only)
+app.put('/api/admin/tts-settings', authenticate, requireAdmin, async (req, res) => {
+    const { dailyLimit } = req.body;
+
+    if (!dailyLimit || dailyLimit < 0) {
+        return res.status(400).json({ error: 'Invalid daily limit' });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query(
+            `INSERT INTO api_configs (config_key, config_value, description)
+             VALUES ('tts_daily_limit', $1, 'Daily premium TTS limit per student')
+             ON CONFLICT (config_key) 
+             DO UPDATE SET config_value = $1, updated_at = NOW()`,
+            [dailyLimit.toString()]
+        );
+
+        res.json({ 
+            success: true, 
+            dailyLimit,
+            message: 'TTS settings updated successfully' 
+        });
+    } catch (err) {
+        console.error('Update TTS settings error:', err);
+        res.status(500).json({ error: 'Failed to update TTS settings' });
+    } finally {
+        client.release();
+    }
+});
+
+// Get student's TTS usage for today
+app.get('/api/user/tts-usage', authenticate, async (req, res) => {
+    const client = await pool.connect();
+    try {
+        const userId = req.user.id;
+        const today = new Date().toISOString().split('T')[0];
+
+        // Get daily limit from settings
+        const settingsResult = await client.query(
+            `SELECT config_value FROM api_configs WHERE config_key = 'tts_daily_limit'`
+        );
+        const dailyLimit = settingsResult.rows.length > 0 
+            ? parseInt(settingsResult.rows[0].config_value) 
+            : 15;
+
+        // Get today's usage
+        const usageResult = await client.query(
+            `SELECT COUNT(*) as count 
+             FROM tts_usage 
+             WHERE user_id = $1 AND DATE(created_at) = $2`,
+            [userId, today]
+        );
+
+        const usedToday = parseInt(usageResult.rows[0].count);
+        const remaining = Math.max(0, dailyLimit - usedToday);
+
+        res.json({
+            dailyLimit,
+            usedToday,
+            remaining,
+            canUsePremium: remaining > 0
+        });
+    } catch (err) {
+        console.error('Get TTS usage error:', err);
+        res.status(500).json({ error: 'Failed to get TTS usage' });
+    } finally {
+        client.release();
+    }
+});
+
+// Track TTS usage (chiamata dall'endpoint /api/tts quando genera audio)
+async function trackTTSUsage(client, userId) {
+    try {
+        await client.query(
+            `INSERT INTO tts_usage (user_id, created_at) VALUES ($1, NOW())`,
+            [userId]
+        );
+    } catch (err) {
+        console.error('Track TTS usage error:', err);
+    }
+}
+
+// ============================================
+// MODIFY EXISTING /api/tts ENDPOINT
+// ============================================
+// Sostituisci l'endpoint /api/tts esistente con questa versione aggiornata:
 
 app.post('/api/tts', authenticate, async (req, res) => {
+    const client = await pool.connect();
     try {
         const { text, voiceLang = 'en-US', voiceGender = 'MALE' } = req.body;
+        const userId = req.user.id;
 
         if (!text) {
             return res.status(400).json({ error: 'Text is required' });
         }
 
+        // Check if user can use premium TTS
+        const today = new Date().toISOString().split('T')[0];
+        
+        // Get daily limit
+        const settingsResult = await client.query(
+            `SELECT config_value FROM api_configs WHERE config_key = 'tts_daily_limit'`
+        );
+        const dailyLimit = settingsResult.rows.length > 0 
+            ? parseInt(settingsResult.rows[0].config_value) 
+            : 15;
+
+        // Get today's usage
+        const usageResult = await client.query(
+            `SELECT COUNT(*) as count 
+             FROM tts_usage 
+             WHERE user_id = $1 AND DATE(created_at) = $2`,
+            [userId, today]
+        );
+
+        const usedToday = parseInt(usageResult.rows[0].count);
+
+        // If limit exceeded, return error to trigger browser fallback
+        if (usedToday >= dailyLimit) {
+            return res.status(429).json({ 
+                error: 'Daily premium TTS limit reached',
+                usedToday,
+                dailyLimit,
+                fallbackToLocal: true
+            });
+        }
+
         // Limita lunghezza testo (max 5000 caratteri)
         const limitedText = text.substring(0, 5000);
 
-        // Voice mapping per lingue diverse
+        // Voice mapping
         const voiceMap = {
             'en-US': { 
                 'MALE': 'en-US-Neural2-J',
@@ -543,14 +698,13 @@ app.post('/api/tts', authenticate, async (req, res) => {
         const voiceChoice = voiceMap[voiceLang] || voiceMap['en-US'];
         const voiceName = voiceChoice[voiceGender] || voiceChoice['MALE'];
 
-        // Usa GOOGLE_TTS_API_KEY se esiste, altrimenti GOOGLE_API_KEY
         const apiKey = process.env.GOOGLE_TTS_API_KEY || process.env.GOOGLE_API_KEY;
 
         if (!apiKey) {
             throw new Error('Google API Key not configured');
         }
 
-        // Chiamata a Google Cloud TTS
+        // Call Google Cloud TTS
         const response = await fetch(
             `https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`,
             {
@@ -582,9 +736,14 @@ app.post('/api/tts', authenticate, async (req, res) => {
 
         const data = await response.json();
 
+        // Track usage
+        await trackTTSUsage(client, userId);
+
         res.json({
             audioContent: data.audioContent,
-            voiceUsed: voiceName
+            voiceUsed: voiceName,
+            usedToday: usedToday + 1,
+            dailyLimit
         });
 
     } catch (error) {
@@ -593,6 +752,8 @@ app.post('/api/tts', authenticate, async (req, res) => {
             error: 'Text-to-speech failed',
             fallbackToLocal: true
         });
+    } finally {
+        client.release();
     }
 });
 
