@@ -496,17 +496,13 @@ ${materials.rows.map(m => `- ${m.title}: ${m.description || ''}`).join('\n')}
     }
 });
 
-
-// Aggiungi questo endpoint DOPO gli altri endpoint API nel server.js
-// Inserisci dopo l'endpoint /api/chat (circa riga 400)
-
 // ============================================
 // GOOGLE CLOUD TEXT-TO-SPEECH ENDPOINT
 // ============================================
 
-app.post('/api/tts', authenticateToken, async (req, res) => {
+app.post('/api/tts', authenticate, async (req, res) => {
     try {
-        const { text, voiceLang = 'en-US', voiceGender = 'NEUTRAL' } = req.body;
+        const { text, voiceLang = 'en-US', voiceGender = 'MALE' } = req.body;
 
         if (!text) {
             return res.status(400).json({ error: 'Text is required' });
@@ -517,19 +513,46 @@ app.post('/api/tts', authenticateToken, async (req, res) => {
 
         // Voice mapping per lingue diverse
         const voiceMap = {
-            'en-US': { name: 'en-US-Neural2-J', gender: 'MALE' },      // Voce maschile naturale US
-            'en-GB': { name: 'en-GB-Neural2-B', gender: 'FEMALE' },    // Voce femminile naturale UK
-            'en-AU': { name: 'en-AU-Neural2-B', gender: 'FEMALE' },
-            'en-IN': { name: 'en-IN-Neural2-B', gender: 'FEMALE' },
-            'en-CA': { name: 'en-US-Neural2-J', gender: 'MALE' }
+            'en-US': { 
+                'MALE': 'en-US-Neural2-J',
+                'FEMALE': 'en-US-Neural2-F',
+                'NEUTRAL': 'en-US-Neural2-A'
+            },
+            'en-GB': { 
+                'MALE': 'en-GB-Neural2-D',
+                'FEMALE': 'en-GB-Neural2-F',
+                'NEUTRAL': 'en-GB-Neural2-A'
+            },
+            'en-AU': { 
+                'MALE': 'en-AU-Neural2-D',
+                'FEMALE': 'en-AU-Neural2-A',
+                'NEUTRAL': 'en-AU-Neural2-B'
+            },
+            'en-IN': { 
+                'MALE': 'en-IN-Neural2-D',
+                'FEMALE': 'en-IN-Neural2-A',
+                'NEUTRAL': 'en-IN-Neural2-B'
+            },
+            'en-CA': { 
+                'MALE': 'en-US-Neural2-J',
+                'FEMALE': 'en-US-Neural2-F',
+                'NEUTRAL': 'en-US-Neural2-A'
+            }
         };
 
-        const voice = voiceMap[voiceLang] || voiceMap['en-US'];
+        const voiceChoice = voiceMap[voiceLang] || voiceMap['en-US'];
+        const voiceName = voiceChoice[voiceGender] || voiceChoice['MALE'];
+
+        // Usa GOOGLE_TTS_API_KEY se esiste, altrimenti GOOGLE_API_KEY
+        const apiKey = process.env.GOOGLE_TTS_API_KEY || process.env.GOOGLE_API_KEY;
+
+        if (!apiKey) {
+            throw new Error('Google API Key not configured');
+        }
 
         // Chiamata a Google Cloud TTS
         const response = await fetch(
-`https://texttospeech.googleapis.com/v1/text:synthesize?key=${process.env.GOOGLE_TTS_API_KEY || process.env.GOOGLE_API_KEY}`,
-            
+            `https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`,
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -537,43 +560,41 @@ app.post('/api/tts', authenticateToken, async (req, res) => {
                     input: { text: limitedText },
                     voice: {
                         languageCode: voiceLang,
-                        name: voice.name,
-                        ssmlGender: voice.gender
+                        name: voiceName,
+                        ssmlGender: voiceGender
                     },
                     audioConfig: {
                         audioEncoding: 'MP3',
-                        speakingRate: 0.95,  // Leggermente più lento per chiarezza
+                        speakingRate: 0.95,
                         pitch: 0.0,
                         volumeGainDb: 0.0,
-                        effectsProfileId: ['headphone-class-device']  // Ottimizzato per cuffie
+                        effectsProfileId: ['headphone-class-device']
                     }
                 })
             }
         );
 
         if (!response.ok) {
+            const errorData = await response.json();
+            console.error('TTS API error:', errorData);
             throw new Error(`TTS API error: ${response.statusText}`);
         }
 
         const data = await response.json();
 
-        // Ritorna l'audio in base64
         res.json({
-            audioContent: data.audioContent,  // Base64 encoded MP3
-            voiceUsed: voice.name
+            audioContent: data.audioContent,
+            voiceUsed: voiceName
         });
 
     } catch (error) {
         console.error('TTS error:', error);
         res.status(500).json({ 
             error: 'Text-to-speech failed',
-            fallbackToLocal: true  // Frontend userà voce browser
+            fallbackToLocal: true
         });
     }
 });
-
-
-
 
 
 // ============================================
