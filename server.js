@@ -1253,6 +1253,93 @@ app.put('/api/admin/users/:userId', authenticate, requireAdmin, async (req, res)
 });
 
 // ============================================
+// NUOVI ENDPOINT PER TTS TRACKING E USER EDIT
+// ============================================
+// Aggiungi questi endpoint al file server.js PRIMA di app.listen()
+
+// Get TTS usage for specific user on specific date (Admin only)
+app.get('/api/admin/users/:userId/tts-usage', authenticate, requireAdmin, async (req, res) => {
+    const client = await pool.connect();
+    try {
+        const { userId } = req.params;
+        const date = req.query.date || new Date().toISOString().split('T')[0];
+
+        const result = await client.query(
+            `SELECT COUNT(*) as count 
+             FROM tts_usage 
+             WHERE user_id = $1 AND DATE(created_at) = $2`,
+            [userId, date]
+        );
+
+        res.json({
+            userId: parseInt(userId),
+            date,
+            count: parseInt(result.rows[0].count)
+        });
+    } catch (err) {
+        console.error('Get user TTS usage error:', err);
+        res.status(500).json({ error: 'Failed to get TTS usage' });
+    } finally {
+        client.release();
+    }
+});
+
+// Update user (Admin only)
+app.put('/api/admin/users/:userId', authenticate, requireAdmin, async (req, res) => {
+    const client = await pool.connect();
+    try {
+        const { userId } = req.params;
+        const { name, email, role, level, monthly_limit, password } = req.body;
+
+        let query = 'UPDATE users SET name = $1, email = $2, role = $3';
+        let params = [name, email, role];
+        let paramCount = 3;
+
+        if (level) {
+            paramCount++;
+            query += `, level = $${paramCount}`;
+            params.push(level);
+        }
+
+        if (monthly_limit !== undefined) {
+            paramCount++;
+            query += `, monthly_limit = $${paramCount}`;
+            params.push(monthly_limit);
+        }
+
+        if (password) {
+            const hashedPassword = await bcrypt.hash(password, 10);
+            paramCount++;
+            query += `, password = $${paramCount}`;
+            params.push(hashedPassword);
+        }
+
+        paramCount++;
+        query += `, updated_at = NOW() WHERE id = $${paramCount} RETURNING *`;
+        params.push(userId);
+
+        const result = await client.query(query, params);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        const user = result.rows[0];
+        delete user.password;
+
+        res.json({
+            success: true,
+            user
+        });
+    } catch (err) {
+        console.error('Update user error:', err);
+        res.status(500).json({ error: 'Failed to update user' });
+    } finally {
+        client.release();
+    }
+});
+
+// ============================================
 // START SERVER
 // ============================================
 
